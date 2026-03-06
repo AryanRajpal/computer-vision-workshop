@@ -57,7 +57,9 @@ LABELS_FILE     = "synset_words.txt"
 #   13. Return (label, confidence)
 # =============================================================
 
-def run_pipeline(image_path: str, target_label: str = "") -> tuple:
+def run_pipeline(image_path: str,
+                 target_label: str = "",
+                 min_confidence: float = 0.5) -> tuple:
     """
     Run the full detection and classification pipeline on one image.
 
@@ -68,7 +70,43 @@ def run_pipeline(image_path: str, target_label: str = "") -> tuple:
     Returns:
         (label, confidence) or None if no subject was found.
     """
-    raise NotImplementedError
+    img = load_image(image_path)
+    labels = load_labels(LABELS_FILE)
+    net = load_model(MODEL_PROTOTXT, MODEL_WEIGHTS)
+
+    edges = preprocess(img)
+    contour = find_subject_contour(edges)
+    if contour is None:
+        print(f"[!] No qualifying subject contour found in '{image_path}'.")
+        return None
+
+    roi, box = crop_roi(img, contour)
+    blob = prepare_blob(roi)
+    predictions = run_inference(net, blob)
+    top_label, top_confidence = get_top_prediction(predictions, labels)
+
+    if target_label:
+        target = target_label.strip().lower()
+        pred = top_label.lower()
+        matched = target in pred or pred in target
+        print(f"Expected: '{target_label}'")
+        print(f"Predicted: '{top_label}' ({top_confidence * 100:.1f}%)")
+        print(f"Match: {'YES' if matched else 'NO'}")
+
+    draw_label = top_label
+    draw_color = (0, 255, 0)
+    return_label = top_label
+    if top_confidence < min_confidence:
+        draw_label = f"Low confidence: {top_label}"
+        draw_color = (0, 0, 255)
+        return_label = "uncertain"
+
+    annotated = draw_prediction(img, box, draw_label, top_confidence, color=draw_color)
+    cv2.imshow("CV Workshop Classifier", annotated)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+    return return_label, top_confidence
 
 
 # =============================================================
@@ -87,14 +125,71 @@ def run_pipeline(image_path: str, target_label: str = "") -> tuple:
 #        · the single best prediction (label, confidence, filename)
 # =============================================================
 
-def run_batch(folder: str) -> None:
+def run_batch(folder: str, min_confidence: float = 0.5) -> None:
     """
     Classify every .jpg / .png in a folder and print a summary.
 
     Args:
         folder: Path to directory containing images.
     """
-    raise NotImplementedError
+    if not os.path.isdir(folder):
+        raise FileNotFoundError(f"Batch folder not found: {folder}")
+
+    labels = load_labels(LABELS_FILE)
+    net = load_model(MODEL_PROTOTXT, MODEL_WEIGHTS)
+
+    files = sorted(
+        f for f in os.listdir(folder)
+        if f.lower().endswith((".jpg", ".jpeg", ".png"))
+    )
+
+    processed = 0
+    high_confidence_count = 0
+    best_prediction = None
+
+    for filename in files:
+        path = os.path.join(folder, filename)
+        try:
+            img = load_image(path)
+        except FileNotFoundError as e:
+            print(f"[!] {e}")
+            continue
+
+        edges = preprocess(img)
+        contour = find_subject_contour(edges)
+        if contour is None:
+            print(f"[~] Skipping {filename}: no qualifying subject contour found.")
+            continue
+
+        roi, _ = crop_roi(img, contour)
+        blob = prepare_blob(roi)
+        predictions = run_inference(net, blob)
+        top3 = get_top_k_predictions(predictions, labels, k=3)
+        top_label, top_confidence = top3[0]
+
+        result_label = top_label if top_confidence >= min_confidence else "uncertain"
+        processed += 1
+
+        if top_confidence >= 0.70:
+            high_confidence_count += 1
+
+        if best_prediction is None or top_confidence > best_prediction[1]:
+            best_prediction = (result_label, top_confidence, filename)
+
+        print(f"\n{filename}")
+        for i, (label, confidence) in enumerate(top3, start=1):
+            print(f"  Top {i}: {label} ({confidence * 100:.1f}%)")
+        if result_label == "uncertain":
+            print(f"  Result: uncertain (< {min_confidence * 100:.1f}% threshold)")
+
+    print("\nBatch Summary")
+    print(f"  Processed images: {processed}")
+    print(f"  With top-confidence >= 70%: {high_confidence_count}")
+    if best_prediction is None:
+        print("  Best prediction: none")
+    else:
+        label, confidence, filename = best_prediction
+        print(f"  Best prediction: {label} ({confidence * 100:.1f}%) in {filename}")
 
 
 # =============================================================
